@@ -1,98 +1,121 @@
-const { google } = require('googleapis');
-const { getTokens, saveTokens } = require('./store');
+// Gmail access via SMTP (sending) + IMAP (reading replies), authenticated
+// with a Gmail "App Password" — no OAuth, no Google verification, no
+// weekly re-login. App Passwords are permanent until you revoke them.
+//
+// Requires 2-Step Verification to be ON for the Gmail account, then an
+// App Password generated at: https://myaccount.google.com/apppasswords
 
-function oauthClient() {
-  return new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    process.env.OAUTH_REDIRECT_URI // set to https://YOUR-SITE.netlify.app/.netlify/functions/oauth-callback
-  );
+const nodemailer = require('nodemailer');
+const { ImapFlow } = require('imapflow');
+const { simpleParser } = require('mailparser');
+const crypto = require('crypto');
+const { getTokens } = require('./store');
+
+async function credsFor(accountId) {
+  const creds = await getTokens(accountId); // { email, appPassword }
+  if (!creds || !creds.appPassword) {
+    throw new Error(
+      `Gmail account "${accountId}" connected nahi hai — pehle /.netlify/functions/connect-account?accountId=${accountId} khol ke App Password add karo.`
+    );
+  }
+  return creds;
 }
 
-// Returns an authorized OAuth2 client for a given account id (acc1, acc2, ...)
-// Refreshes the access token using the stored refresh_token every time —
-// this is what lets sending work with nobody logged into a browser.
-async function clientFor(accountId) {
-  const tokens = await getTokens(accountId);
-  if (!tokens || !tokens.refresh_token) {
-    throw new Error(`Gmail account "${accountId}" connected nahi hai — pehle /connect-start?accountId=${accountId} khol ke connect karo.`);
-  }
-  const client = oauthClient();
-  client.setCredentials({ refresh_token: tokens.refresh_token });
-  // Force a refresh so we always have a live access token (cheap call).
-  const { credentials } = await client.refreshAccessToken();
-  client.setCredentials(credentials);
-  // refresh_token isn't always re-issued by Google — keep the original.
-  await saveTokens(accountId, { ...tokens, ...credentials, refresh_token: tokens.refresh_token });
+function smtpTransport(creds) {
+  return nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
+    auth: { user: creds.email, pass: creds.appPassword },
+  });
+}
+
+async function openImap(creds) {
+  const client = new ImapFlow({
+    host: 'imap.gmail.com',
+    port: 993,
+    secure: true,
+    auth: { user: creds.email, pass: creds.appPassword },
+    logger: false,
+  });
+  await client.connect();
   return client;
 }
 
-function base64Url(str) {
-  return Buffer.from(str)
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
+function makeMessageId(email) {
+  const domain = (email.split('@')[1] || 'gmail.com').trim();
+  return `<${crypto.randomBytes(16).toString('hex')}@${domain}>`;
 }
 
-function buildRawMessage({ from, to, subject, body, inReplyTo, references }) {
-  const headers = [
-    `From: ${from}`,
-    `To: ${to}`,
-    `Subject: ${subject}`,
-    'Content-Type: text/plain; charset="UTF-8"',
-    'MIME-Version: 1.0',
-  ];
-  if (inReplyTo) headers.push(`In-Reply-To: ${inReplyTo}`);
-  if (references) headers.push(`References: ${references}`);
-  const raw = headers.join('\r\n') + '\r\n\r\n' + body;
-  return base64Url(raw);
-}
-
-// Sends an email from the given account. Pass threadId to send a follow-up
-// inside the same Gmail thread (so it reads as a reply-chain, not spam).
+// Sends an email from the given account. `threadId` here is actually the
+// ROOT message's Message-ID header — passing it back in on follow-ups sets
+// In-Reply-To/References so Gmail (and every other mail client) groups the
+// messages into one thread, exactly like the old Gmail-API version did.
 async function sendMail(accountId, fromEmail, { to, subject, body, threadId }) {
-  const auth = await clientFor(accountId);
-  const gmail = google.gmail({ version: 'v1', auth });
-  const raw = buildRawMessage({ from: fromEmail, to, subject, body });
-  const res = await gmail.users.messages.send({
-    userId: 'me',
-    requestBody: { raw, threadId: threadId || undefined },
-  });
-  return res.data; // { id, threadId, ... }
+  const creds = await credsFor(accountId);
+  const transporter = smtpTransport(creds);
+  const messageId = makeMessageId(fromEmail);
+
+  const mailOptions = {
+    from: fromEmail,
+    to,
+    subject: threadId && !/^re:/i.test(subject) ? `Re: ${subject}` : subject,
+    text: body,
+    messageId,
+  };
+  if (threadId) {
+    mailOptions.inReplyTo = threadId;
+    mailOptions.references = threadId;
+  }
+
+  await transporter.sendMail(mailOptions);
+  return { id: messageId, threadId: threadId || messageId };
 }
 
-// Returns true if the thread has any message NOT sent by us — i.e. the lead
-// replied. Used by process-queue to auto-stop follow-up sequences.
-async function threadHasReply(accountId, threadId, ourEmail) {
-  const details = await getReplyDetails(accountId, threadId, ourEmail);
-  return details.replied;
-}
-
-// Same check, but also returns the reply's snippet (preview text) and who/when
-// it came from — used for Telegram notifications so you can see what was
-// actually said without opening Gmail.
+// Returns { replied, snippet, from, date } — true if anyone other than us
+// has replied anywhere in the thread (searched via standard References /
+// In-Reply-To headers, so it works on Gmail's IMAP just like any provider).
 async function getReplyDetails(accountId, threadId, ourEmail) {
-  const auth = await clientFor(accountId);
-  const gmail = google.gmail({ version: 'v1', auth });
-  const thread = await gmail.users.threads.get({
-    userId: 'me',
-    id: threadId,
-    format: 'metadata',
-    metadataHeaders: ['From', 'Date'],
-  });
-  const messages = thread.data.messages || [];
-  const replyMsgs = messages.filter((m) => {
-    const headers = m.payload.headers || [];
-    const from = (headers.find((h) => h.name === 'From') || {}).value || '';
-    return from && !from.toLowerCase().includes(ourEmail.toLowerCase());
-  });
-  if (!replyMsgs.length) return { replied: false };
-  const last = replyMsgs[replyMsgs.length - 1];
-  const headers = last.payload.headers || [];
-  const from = (headers.find((h) => h.name === 'From') || {}).value || '';
-  const date = (headers.find((h) => h.name === 'Date') || {}).value || '';
-  return { replied: true, snippet: last.snippet || '', from, date };
+  const creds = await credsFor(accountId);
+  const client = await openImap(creds);
+  try {
+    const lock = await client.getMailboxLock('[Gmail]/All Mail');
+    try {
+      const byRefs = await client.search({ header: { references: threadId } }, { uid: true });
+      const byReply = await client.search({ header: { 'in-reply-to': threadId } }, { uid: true });
+      const uids = Array.from(new Set([...(byRefs || []), ...(byReply || [])])).sort((a, b) => a - b);
+      if (!uids.length) return { replied: false };
+
+      const lastUid = uids[uids.length - 1];
+      let from = '',
+        date = '',
+        snippet = '';
+      for await (const msg of client.fetch(lastUid, { envelope: true, uid: true }, { uid: true })) {
+        const addr = (msg.envelope.from && msg.envelope.from[0]) || {};
+        from = addr.address || '';
+        date = msg.envelope.date ? new Date(msg.envelope.date).toString() : '';
+        // skip if this turned out to be our own sent copy
+        if (from && ourEmail && from.toLowerCase() === ourEmail.toLowerCase()) return { replied: false };
+      }
+      try {
+        const { content } = await client.download(lastUid, undefined, { uid: true });
+        const parsed = await simpleParser(content);
+        snippet = (parsed.text || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+      } catch (e) {
+        snippet = '';
+      }
+      return { replied: true, snippet, from, date };
+    } finally {
+      lock.release();
+    }
+  } finally {
+    await client.logout().catch(() => {});
+  }
 }
 
-module.exports = { oauthClient, clientFor, sendMail, threadHasReply, getReplyDetails };
+async function threadHasReply(accountId, threadId, ourEmail) {
+  const d = await getReplyDetails(accountId, threadId, ourEmail);
+  return d.replied;
+}
+
+module.exports = { sendMail, threadHasReply, getReplyDetails, credsFor };
