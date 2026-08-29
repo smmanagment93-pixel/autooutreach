@@ -1,16 +1,30 @@
 // Storage layer — uses Netlify Blobs (built into every Netlify site, zero
 // extra setup, no GitHub repo / DB needed). Data survives forever, across
 // every function invocation, exactly like a real server-side database.
+//
+// Netlify normally auto-configures Blobs (siteID/token injected via env),
+// but on some deploys that auto-detection silently fails
+// (MissingBlobsEnvironmentError). If NETLIFY_SITE_ID and
+// NETLIFY_BLOBS_TOKEN are set, we pass them explicitly so it always works
+// regardless of that bug.
 const { getStore } = require('@netlify/blobs');
 
 const DATA_STORE = 'outreach-data';
 const TOKEN_STORE = 'outreach-tokens'; // kept separate from business data
 
+function storeOpts(name) {
+  const opts = { name };
+  if (process.env.NETLIFY_SITE_ID && process.env.NETLIFY_BLOBS_TOKEN) {
+    opts.siteID = process.env.NETLIFY_SITE_ID;
+    opts.token = process.env.NETLIFY_BLOBS_TOKEN;
+  }
+  return opts;
+}
 function dataStore() {
-  return getStore(DATA_STORE);
+  return getStore(storeOpts(DATA_STORE));
 }
 function tokenStore() {
-  return getStore(TOKEN_STORE);
+  return getStore(storeOpts(TOKEN_STORE));
 }
 
 const DEFAULT_CONFIG = {
