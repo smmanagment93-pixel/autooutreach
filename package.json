@@ -1,0 +1,11 @@
+{
+  "name": "outreach-automation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Server-side (Netlify Functions) backend for Finance Outreach Hub — auto-sends cold emails, runs 2-day follow-up sequences (max 3), detects replies via Gmail, and stops sequences automatically. Runs 24x7 without any browser open.",
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0",
+    "@netlify/functions": "^2.8.1",
+    "googleapis": "^140.0.1"
+  }
+}
