@@ -1,6 +1,10 @@
 const { getQueue } = require('../lib/store');
+const { handlePreflight, withCors } = require('../lib/cors');
 
-exports.handler = async () => {
+exports.handler = async (event) => {
+  const preflight = handlePreflight(event);
+  if (preflight) return preflight;
+
   const queue = await getQueue();
   const replied = queue
     .filter((q) => q.status === 'replied')
@@ -16,9 +20,9 @@ exports.handler = async () => {
       followUpsSentBeforeReply: q.followUpsSent || 0,
     }));
 
-  return {
+  return withCors({
     statusCode: 200,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ replied }),
-  };
+  });
 };
