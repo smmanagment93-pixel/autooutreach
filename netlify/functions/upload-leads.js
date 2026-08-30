@@ -1,7 +1,9 @@
 const { addLeadsToQueue } = require('../lib/leads');
+const { handlePreflight, withCors } = require('../lib/cors');
 
 exports.handler = async (event) => {
-  if (event.httpMethod === 'OPTIONS') return { statusCode: 200, body: '' };
+  const preflight = handlePreflight(event);
+  if (preflight) return preflight;
   if (event.httpMethod !== 'POST') return json(405, { error: 'POST only' });
 
   let body;
@@ -18,9 +20,9 @@ exports.handler = async (event) => {
 };
 
 function json(statusCode, obj) {
-  return {
+  return withCors({
     statusCode,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(obj),
-  };
+  });
 }
