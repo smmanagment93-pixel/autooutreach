@@ -3,6 +3,7 @@ const { notifyTelegram } = require('../lib/notify');
 const { runOnce } = require('./process-queue');
 const { addLeadsToQueue } = require('../lib/leads');
 const { parseCSV } = require('../lib/csv');
+const { runCheckSent } = require('./check-sent-history');
 
 function isToday(iso) {
   if (!iso) return false;
@@ -24,10 +25,16 @@ async function sendStatus() {
     })
     .join('\n');
 
+  const windowLine =
+    config.sendWindowStart && config.sendWindowEnd
+      ? `Time window: ${config.sendWindowStart}–${config.sendWindowEnd} IST`
+      : `Time window: 24x7 (koi restriction nahi)`;
+
   await notifyTelegram(
     [
       `📊 <b>Outreach Hub status</b>`,
       `Automation: ${enabled ? '🟢 ON' : '🔴 PAUSED'}`,
+      windowLine,
       `Pending queue: ${totalPending}`,
       `Aaj bheje: ${totalSentToday}`,
       `Total replies: ${totalReplied}`,
@@ -48,7 +55,11 @@ const HELP_TEXT = `<b>Commands</b>
 /setgap 3 — follow-up gap din mein set karo (default 2)
 /setname Sunny — sender name set karo
 /setniche trading YouTubers India — niche context set karo
-/setaddress Gorakhpur, UP — business address set karo (US CAN-SPAM footer ke liye)`;
+/setaddress Gorakhpur, UP — business address set karo (US CAN-SPAM footer ke liye)
+/setwindow 09:00 17:30 — sirf is IST time window mein hi naye email/follow-up bhejega (replies hamesha check hote rahenge)
+/setwindow off — time window hatao, wapas 24x7 bhejo
+/checksent — pending leads ko sabhi accounts ke Sent folder se match karke, jo pehle se bheji hui hain unhe "sent" mark kar do (dobara nahi bhejega)
+/checksent acc1 — sirf ek account check karo (zyada leads/accounts hone par safer, jaldi hota hai)`;
 
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 200, body: 'ok' };
@@ -173,6 +184,40 @@ exports.handler = async (event) => {
       config.businessAddress = rest || config.businessAddress;
       await saveConfig(config);
       await notifyTelegram(`✓ Business address set: ${config.businessAddress}`);
+    } else if (cmd === '/setwindow') {
+      const args = rest.split(/\s+/).filter(Boolean);
+      const config = await getConfig();
+      if (args[0] === 'off') {
+        config.sendWindowStart = null;
+        config.sendWindowEnd = null;
+        await saveConfig(config);
+        await notifyTelegram('✓ Time window hata diya — ab 24x7 bhejega.');
+      } else if (args.length === 2 && /^\d{2}:\d{2}$/.test(args[0]) && /^\d{2}:\d{2}$/.test(args[1])) {
+        config.sendWindowStart = args[0];
+        config.sendWindowEnd = args[1];
+        await saveConfig(config);
+        await notifyTelegram(`✓ Ab sirf ${args[0]} se ${args[1]} IST ke beech naye email/follow-up bhejega. (Replies check hamesha hote rahenge.)`);
+      } else {
+        await notifyTelegram('Format: /setwindow 09:00 17:30  (IST, 24-hour). Hatane ke liye: /setwindow off');
+      }
+    } else if (cmd === '/checksent') {
+      const accountIdFilter = rest.trim() || null;
+      await notifyTelegram(
+        accountIdFilter
+          ? `🔍 "${accountIdFilter}" ka Sent folder check kar raha hoon pending leads ke against...`
+          : `🔍 Sabhi connected accounts ke Sent folder check kar raha hoon (halka scan, 1500 recent emails/account) — agar timeout ho jaaye to /checksent acc1 jaisa ek-ek account karke try karo...`
+      );
+      try {
+        const result = await runCheckSent(accountIdFilter);
+        const errLines = result.accountErrors.length
+          ? '\n\n⚠️ Kuch accounts check nahi ho paaye:\n' + result.accountErrors.join('\n')
+          : '';
+        await notifyTelegram(
+          `✓ Check complete.\nPending leads check kiye: ${result.checked}\nAccounts scan kiye: ${result.accountsScanned}\nPehle se sent mile aur mark kar diye: ${result.marked}${errLines}`
+        );
+      } catch (e) {
+        await notifyTelegram(`❌ Check-sent fail hua: ${e.message}${accountIdFilter ? '' : '\n\nTip: /checksent acc1 jaisa ek-ek account karke try karo, kam samay lagega.'}`);
+      }
     } else if (cmd === '/help' || cmd === '/start') {
       await notifyTelegram(HELP_TEXT);
     } else {

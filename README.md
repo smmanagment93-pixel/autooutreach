@@ -17,19 +17,19 @@ mein khud hota rahega, chahe koi browser/laptop khula ho ya na ho.
 
 ## Setup — one-time (~20-25 min)
 
-### Step 1 — Google Cloud: OAuth banao (Gmail se bhejne ke liye)
-1. https://console.cloud.google.com pe naya project banao (ya existing use karo).
-2. **APIs & Services → Library** → "Gmail API" search karke **Enable** karo.
-3. **APIs & Services → OAuth consent screen**:
-   - User type: **External**
-   - App name kuch bhi (e.g. "SM Outreach Automation"), support email apna daalo
-   - Scopes: add karo `gmail.send` aur `gmail.readonly`
-   - **Test users** mein wahi Gmail addresses daalo jo tum automation ke liye use karoge (jab tak app "In production" verified nahi hota, sirf test users hi login kar payenge — tumhare apne 2-3 accounts ke liye ye kaafi hai, verification ki zaroorat nahi)
-4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**:
-   - Application type: **Web application**
-   - Authorized redirect URI: `https://YOUR-SITE-NAME.netlify.app/.netlify/functions/oauth-callback`
-     (site name Step 3 ke baad milega — abhi placeholder daal do, Step 3 ke baad wapas aake isse edit kar sakte ho)
-   - **Client ID** aur **Client Secret** copy karke rakh lo.
+### Step 1 — Gmail App Passwords (koi Google Cloud/OAuth setup nahi chahiye)
+Ye tool Gmail se SMTP (bhejna) aur IMAP (reply check karna) ke through baat
+karta hai, ek **App Password** ke through — Google ka hi official feature.
+Ye OAuth se kaafi simple hai: koi consent screen, test users, ya 7-din
+expiry nahi. Ek baar generate karo, permanent chalta hai jab tak khud revoke
+na karo.
+
+Har Gmail account (jisse bhejna hai) ke liye:
+1. Us account mein **2-Step Verification ON** karo: https://myaccount.google.com/security
+2. https://myaccount.google.com/apppasswords pe jaake koi bhi naam do
+   (jaise "Outreach Hub") aur **App Password generate karo** — 16 characters
+   ka code milega. Ise turant kahin copy karke rakh lo (dobara nahi dikhega).
+3. Ye password baad mein Step 5 mein use hoga — abhi ke liye bas save rakho.
 
 ### Step 2 — (Optional) Groq API key
 AI-personalized opening lines ke liye — https://console.groq.com se free API key le lo.
@@ -50,27 +50,33 @@ Netlify site → **Site configuration → Environment variables** mein add karo:
 
 | Key | Value |
 |---|---|
-| `GOOGLE_CLIENT_ID` | Step 1 se |
-| `GOOGLE_CLIENT_SECRET` | Step 1 se |
-| `OAUTH_REDIRECT_URI` | `https://YOUR-SITE-NAME.netlify.app/.netlify/functions/oauth-callback` |
+| `TELEGRAM_BOT_TOKEN` | @BotFather se |
+| `TELEGRAM_CHAT_ID` | apna Telegram chat id |
 | `GROQ_API_KEY` | (optional, Step 2 se) |
 | `AUTOMATION_ENABLED` | `true` |
 
+(Gmail credentials ab yahan env var mein nahi jaate — wo Step 5 mein per-account
+save hote hain, taaki alag-alag Gmail accounts easily add/replace ho sakein.)
+
 Env vars add karne ke baad **Deploys → Trigger deploy** karke redeploy kar do
-(taaki naye env vars functions mein pahunchein). Google Cloud Console mein bhi
-jaake Step 1's redirect URI ko final Netlify URL se match kar do agar placeholder daala tha.
+(taaki naye env vars functions mein pahunchein).
 
 ### Step 5 — Har Gmail account connect karo (one-time, per account)
 Har us Gmail account ke liye jo bhejne mein use hoga, browser mein kholo:
 
 ```
-https://YOUR-SITE-NAME.netlify.app/.netlify/functions/connect-start?accountId=acc1
+https://YOUR-SITE-NAME.netlify.app/.netlify/functions/connect-account?accountId=acc1
 ```
 
 (`accountId` wahi rakhna jo tum dashboard ke Automation Settings mein us account
-ko doge — e.g. `acc1`, `acc2`.) Us Gmail account se login karo, permission accept
-karo — "✅ connected" dikhega. Har account ke liye repeat karo (accountId change
-karke).
+ko doge — e.g. `acc1`, `acc2`.) Form mein Gmail address aur Step 1 wala 16-character
+App Password daalo, Connect dabao — "✅ connected" dikhega aur ye credentials
+turant test bhi ho jaate hain (galat App Password ho to error turant dikhega).
+Har account ke liye repeat karo (accountId change karke, apna-apna App Password).
+
+**Ye permanent hai** — koi 7-din expiry nahi, koi weekly re-login nahi.
+Account revoke karna ho to seedha https://myaccount.google.com/apppasswords
+pe jaake wahan se delete kar do.
 
 ### Step 6 — Dashboard mein connect karo
 `Finance Outreach Hub` tool mein **Automation Settings** kholo:
@@ -182,8 +188,7 @@ netlify/functions/
   save-config.js            — Automation Settings save
   status.js                  — dashboard "Automation Status"
   replied-leads.js          — dashboard "Replied Leads" tab
-  connect-start.js           — Gmail OAuth shuru (per account, one-time)
-  oauth-callback.js          — Gmail OAuth complete, refresh token save
+  connect-account.js         — Gmail App Password save (per account, one-time, permanent)
   process-queue.js           — MAIN LOGIC: sends + follow-ups + reply-check (scheduled, har 20 min)
   run-now.js                  — same logic, manually trigger karne ke liye (testing)
 netlify/lib/

@@ -118,4 +118,35 @@ async function threadHasReply(accountId, threadId, ourEmail) {
   return d.replied;
 }
 
-module.exports = { sendMail, threadHasReply, getReplyDetails, credsFor };
+// Scans this account's Sent folder and returns a Set of every recipient
+// (To + Cc) email address it has ever emailed (lowercase) — used to detect
+// leads that were already contacted OUTSIDE this tool (manually, or before
+// this tool existed) so they don't get emailed again.
+// Capped to the most recent `limit` sent messages so huge, years-old Sent
+// folders don't make this slow or time out.
+async function listSentRecipients(accountId, limit = 3000) {
+  const creds = await credsFor(accountId);
+  const client = await openImap(creds);
+  const recipients = new Set();
+  try {
+    const lock = await client.getMailboxLock('[Gmail]/Sent Mail');
+    try {
+      const status = await client.status('[Gmail]/Sent Mail', { messages: true });
+      const total = status.messages || 0;
+      if (total > 0) {
+        const from = Math.max(1, total - limit + 1);
+        for await (const msg of client.fetch(`${from}:${total}`, { envelope: true })) {
+          const addrs = [...(msg.envelope.to || []), ...(msg.envelope.cc || [])];
+          for (const a of addrs) if (a.address) recipients.add(a.address.toLowerCase());
+        }
+      }
+    } finally {
+      lock.release();
+    }
+  } finally {
+    await client.logout().catch(() => {});
+  }
+  return recipients;
+}
+
+module.exports = { sendMail, threadHasReply, getReplyDetails, credsFor, listSentRecipients };

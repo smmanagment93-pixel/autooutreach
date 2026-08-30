@@ -35,6 +35,8 @@ const DEFAULT_CONFIG = {
   dailyTarget: 500,
   followUpGapDays: 2,
   automationPaused: false,
+  sendWindowStart: null, // "HH:MM" in IST, e.g. "09:00" — null = no restriction (24x7)
+  sendWindowEnd: null, // "HH:MM" in IST, e.g. "17:30"
 };
 
 async function getConfig() {

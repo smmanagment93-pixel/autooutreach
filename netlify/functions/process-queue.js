@@ -37,6 +37,33 @@ function escapeHtml(s) {
   return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Returns current time in IST (Asia/Kolkata) as "HH:MM", regardless of the
+// server's own timezone (Netlify functions run in UTC).
+function nowIST() {
+  return new Date().toLocaleTimeString('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }); // e.g. "17:34"
+}
+
+// config.sendWindowStart / sendWindowEnd are "HH:MM" strings in IST, or
+// null/empty to mean "no restriction — send anytime, 24x7" (default,
+// backward-compatible with setups that never configured a window).
+// Handles overnight windows too (e.g. start "22:00" end "06:00").
+function isWithinSendWindow(config) {
+  const start = config.sendWindowStart;
+  const end = config.sendWindowEnd;
+  if (!start || !end) return true; // no window configured = always allowed
+  const now = nowIST();
+  if (start <= end) {
+    return now >= start && now <= end;
+  }
+  // overnight window, e.g. 22:00 -> 06:00
+  return now >= start || now <= end;
+}
+
 async function runOnce() {
   const config = await getConfig();
   if (process.env.AUTOMATION_ENABLED === 'false' || config.automationPaused) {
@@ -86,15 +113,33 @@ async function runOnce() {
     return candidates[0] || null;
   }
 
+  // ---- 2.5. Concurrency safety: skip items another run is mid-send on ----
+  // Before sending, each item gets `claimedAt` set + saved immediately (see
+  // below) so a second overlapping run (scheduled cron firing while a
+  // manual /run is still going, or two /run's back-to-back) sees the claim
+  // and skips it instead of emailing the same lead twice. If a run crashes
+  // mid-send, the claim goes stale after CLAIM_STUCK_MS and is released so
+  // the lead isn't stuck forever.
+  const CLAIM_STUCK_MS = 3 * 60 * 1000; // 3 minutes
+  for (const q of queue) {
+    if (q.claimedAt && Date.now() - new Date(q.claimedAt).getTime() > CLAIM_STUCK_MS) {
+      q.claimedAt = null; // stale — release so it can be retried
+    }
+  }
+
   // ---- 3. Build the list of leads due for action right now ----
+  const withinWindow = isWithinSendWindow(config);
   const followUpGapDays = config.followUpGapDays || 2;
-  const dueForFirstSend = queue.filter((q) => q.status === 'pending');
-  const dueForFollowUp = queue.filter(
-    (q) =>
-      ['sent', 'followup1', 'followup2'].includes(q.status) &&
-      (q.followUpsSent || 0) < MAX_FOLLOWUPS &&
-      daysSince(q.lastActionAt) >= followUpGapDays
-  );
+  const dueForFirstSend = withinWindow ? queue.filter((q) => q.status === 'pending' && !q.claimedAt) : [];
+  const dueForFollowUp = withinWindow
+    ? queue.filter(
+        (q) =>
+          ['sent', 'followup1', 'followup2'].includes(q.status) &&
+          (q.followUpsSent || 0) < MAX_FOLLOWUPS &&
+          daysSince(q.lastActionAt) >= followUpGapDays &&
+          !q.claimedAt
+      )
+    : [];
 
   let sentCount = 0,
     firstSendCount = 0,
@@ -119,11 +164,23 @@ async function runOnce() {
 
     if (sentCount > 0) await sleep(randomDelay()); // human-like gap, not a blast
 
+    // Claim this item and persist IMMEDIATELY, before actually sending —
+    // this is what stops a second overlapping run from also picking it up.
+    item.claimedAt = new Date().toISOString();
+    await saveQueue(queue);
+
     try {
       const followUpNumber = (item.followUpsSent || 0) + 1;
       const { subject, body } = isFollowUp
         ? await composeFollowUp(item, config, followUpNumber)
         : await composeFirstEmail(item, config);
+
+      // Safety net: never actually send a blank/near-blank email. If this
+      // ever fires it means something upstream (AI, template) broke —
+      // better to skip and retry next run than send an empty message.
+      if (!subject || !subject.trim() || !body || body.trim().length < 20) {
+        throw new Error('Composed email was empty/too short — skipped instead of sending blank.');
+      }
 
       const result = await sendMail(account.id, account.email, {
         to: item.email,
@@ -153,6 +210,10 @@ async function runOnce() {
       item.lastError = e.message;
       failCount++;
     }
+
+    item.claimedAt = null; // release the claim — done (sent or failed either way)
+    await saveQueue(queue); // save right after each send, not just at the very end —
+    // so a crash/timeout mid-run never loses track of emails already sent
   }
 
   await saveQueue(queue);
@@ -175,7 +236,7 @@ async function runOnce() {
     await notifyTelegram(lines.join('\n'));
   }
 
-  return { sentCount, firstSendCount, followUpCount, failCount, newReplies: newReplies.length, repliesChecked: checked };
+  return { sentCount, firstSendCount, followUpCount, failCount, newReplies: newReplies.length, repliesChecked: checked, withinSendWindow: withinWindow };
 }
 
 exports.handler = schedule('*/20 * * * *', async () => {
