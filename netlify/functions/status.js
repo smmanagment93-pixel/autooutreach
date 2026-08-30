@@ -1,4 +1,5 @@
 const { getConfig, getQueue } = require('../lib/store');
+const { handlePreflight, withCors } = require('../lib/cors');
 
 function isToday(iso) {
   if (!iso) return false;
@@ -7,7 +8,10 @@ function isToday(iso) {
   return d.toDateString() === now.toDateString();
 }
 
-exports.handler = async () => {
+exports.handler = async (event) => {
+  const preflight = handlePreflight(event);
+  if (preflight) return preflight;
+
   const config = await getConfig();
   const queue = await getQueue();
 
@@ -25,7 +29,7 @@ exports.handler = async () => {
     return { id: a.id, email: a.email, dailyCap: a.dailyCap, sentToday, queued };
   });
 
-  return {
+  return withCors({
     statusCode: 200,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -37,5 +41,5 @@ exports.handler = async () => {
       totalRepliedDetected,
       perAccount,
     }),
-  };
+  });
 };
